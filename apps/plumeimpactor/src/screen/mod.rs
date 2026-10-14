@@ -14,6 +14,7 @@ use iced::{Element, Subscription, Task};
 
 use plume_store::AccountStore;
 use plume_utils::{Device, SignerOptions};
+use rust_i18n::t;
 
 use crate::subscriptions;
 use crate::tray::ImpactorTray;
@@ -526,6 +527,30 @@ impl Impactor {
                                     });
                                 });
                             }
+                            Task::none()
+                        }
+                        settings::Message::ResetAdiPb => {
+                            std::thread::spawn(|| {
+                                let (title, description) = match crate::defaults::reset_adi_pb() {
+                                    Ok(crate::defaults::AdiReset::Cleared) => (
+                                        t!("settings_reset_adi_pb").to_string(),
+                                        t!("settings_reset_adi_pb_done").to_string(),
+                                    ),
+                                    Ok(crate::defaults::AdiReset::AlreadyClear) => (
+                                        t!("settings_reset_adi_pb").to_string(),
+                                        t!("settings_reset_adi_pb_empty").to_string(),
+                                    ),
+                                    Err(err) => (
+                                        t!("settings_reset_adi_pb").to_string(),
+                                        format!("{}: {err}", t!("settings_reset_adi_pb_failed")),
+                                    ),
+                                };
+                                rfd::MessageDialog::new()
+                                    .set_title(title)
+                                    .set_description(description)
+                                    .set_buttons(rfd::MessageButtons::Ok)
+                                    .show();
+                            });
                             Task::none()
                         }
                         settings::Message::ToggleAutoStart(enabled) => {

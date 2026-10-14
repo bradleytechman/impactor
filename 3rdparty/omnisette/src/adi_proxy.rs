@@ -122,8 +122,16 @@ pub trait ConfigurableADIProxy: ADIProxy {
 }
 
 pub const AKD_USER_AGENT: &str = "akd/1.0 CFNetwork/808.1.4";
-pub const CLIENT_INFO_HEADER: &str =
+/// URL-bag lookup only. An Android client info makes this lookup return the
+/// short bag on gsd.apple.com. The lookup carries no anisette data, so Apple
+/// does not compare it to the machine that produced the anisette data.
+pub const LOOKUP_CLIENT_INFO: &str =
     "<MacBookPro13,2> <macOS;13.1;22C65> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
+/// Reported for provisioning and sign-in. Anisette data is produced by Apple's
+/// Android ADI library. Since 2026-10-12 GrandSlam rejects a sign-in whose
+/// client OS is not that library's (-80045).
+pub const CLIENT_INFO_HEADER: &str =
+    "<Pixel 7> <Android;14;UQ1A.240205.002> <com.apple.AuthKit/1 (com.apple.akd/1.0)>";
 pub const DS_ID: i64 = -2;
 pub const IDENTIFIER_LENGTH: usize = 16;
 pub type Identifier = [u8; IDENTIFIER_LENGTH];
@@ -166,10 +174,6 @@ impl dyn ADIProxy {
         headers.insert("Content-Type", HeaderValue::from_str("text/x-xml-plist")?);
 
         headers.insert(
-            "X-Mme-Client-Info",
-            HeaderValue::from_str(CLIENT_INFO_HEADER)?,
-        );
-        headers.insert(
             "X-Mme-Device-Id",
             HeaderValue::from_str(self.get_device_identifier().as_str())?,
         );
@@ -200,6 +204,7 @@ impl dyn ADIProxy {
 
         let url_bag_res = client
             .get("https://gsa.apple.com/grandslam/GsService2/lookup")
+            .header("X-Mme-Client-Info", LOOKUP_CLIENT_INFO)
             .send()
             .await?
             .plist()
@@ -234,6 +239,7 @@ impl dyn ADIProxy {
         debug!("First provisioning request...");
         let response = client
             .post(start_provisioning_url)
+            .header("X-Mme-Client-Info", CLIENT_INFO_HEADER)
             .body(sp_request)
             .send()
             .await?
@@ -267,6 +273,7 @@ impl dyn ADIProxy {
         debug!("Second provisioning request...");
         let response = client
             .post(finish_provisioning_url)
+            .header("X-Mme-Client-Info", CLIENT_INFO_HEADER)
             .body(fp_request)
             .send()
             .await?

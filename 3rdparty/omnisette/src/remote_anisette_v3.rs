@@ -16,6 +16,7 @@ use std::fmt::Write;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use uuid::Uuid;
 
+use crate::adi_proxy::{CLIENT_INFO_HEADER, LOOKUP_CLIENT_INFO};
 use crate::{AnisetteError, anisette_headers_provider::AnisetteHeadersProvider};
 
 fn plist_to_string<T: serde::Serialize>(value: &T) -> Result<String, plist::Error> {
@@ -89,6 +90,7 @@ pub struct AnisetteState {
     )]
     keychain_identifier: [u8; 16],
     #[serde(
+        default,
         serialize_with = "bin_serialize_opt",
         deserialize_with = "bin_deserialize_opt"
     )]
@@ -187,12 +189,15 @@ impl AnisetteClient {
     pub async fn new(url: String) -> Result<AnisetteClient, AnisetteError> {
         let path = format!("{}/v3/client_info", url);
         let http_client = make_reqwest()?;
-        let client_info = http_client
+        let mut client_info = http_client
             .get(path)
             .send()
             .await?
             .json::<AnisetteClientInfo>()
             .await?;
+        // Public servers still describe a Mac. The ADI library behind them is
+        // Android, and GrandSlam now requires the client OS to match it.
+        client_info.client_info = CLIENT_INFO_HEADER.to_string();
         Ok(AnisetteClient { client_info, url })
     }
 
@@ -200,11 +205,12 @@ impl AnisetteClient {
         &self,
         state: &AnisetteState,
         builder: RequestBuilder,
+        client_info: &str,
     ) -> RequestBuilder {
         let dt: DateTime<Utc> = Utc::now().round_subsecs(0);
 
         builder
-            .header("X-Mme-Client-Info", &self.client_info.client_info)
+            .header("X-Mme-Client-Info", client_info)
             .header("User-Agent", &self.client_info.user_agent)
             .header("Content-Type", "text/x-xml-plist")
             .header("X-Apple-I-MD-LU", encode_hex(&state.md_lu()))
@@ -286,6 +292,7 @@ impl AnisetteClient {
             .build_apple_request(
                 &state,
                 http_client.get("https://gsa.apple.com/grandslam/GsService2/lookup"),
+                LOOKUP_CLIENT_INFO,
             )
             .send()
             .await?;
@@ -361,7 +368,11 @@ impl AnisetteClient {
                             request: Dictionary::new(),
                         };
                         let resp = self
-                            .build_apple_request(state, http_client.post(start_provisioning_url))
+                            .build_apple_request(
+                                state,
+                                http_client.post(start_provisioning_url),
+                                &self.client_info.client_info,
+                            )
                             .body(plist_to_string(&body_data)?)
                             .send()
                             .await?;
@@ -399,7 +410,11 @@ impl AnisetteClient {
                             request: Dictionary::from_iter([("cpim", cpim)].into_iter()),
                         };
                         let resp = self
-                            .build_apple_request(state, http_client.post(end_provisioning_url))
+                            .build_apple_request(
+                                state,
+                                http_client.post(end_provisioning_url),
+                                &self.client_info.client_info,
+                            )
                             .body(plist_to_string(&body_data)?)
                             .send()
                             .await?;
@@ -517,10 +532,39 @@ impl AnisetteHeadersProvider for RemoteAnisetteProviderV3 {
 
 #[cfg(test)]
 mod tests {
+    use super::AnisetteState;
     use crate::anisette_headers_provider::AnisetteHeadersProvider;
     use crate::remote_anisette_v3::RemoteAnisetteProviderV3;
     use crate::{AnisetteError, DEFAULT_ANISETTE_URL_V3};
     use log::info;
+
+    #[test]
+    fn missing_adi_pb_keeps_the_device_id() {
+        let mut state = AnisetteState::new();
+        let id = state.keychain_identifier;
+        state.adi_pb = Some(vec![1, 2, 3, 4]);
+
+        let dir = std::env::temp_dir().join(format!("omnisette-adi-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.plist");
+        plist::to_file_xml(&path, &state).unwrap();
+
+        let mut value: plist::Value = plist::from_file(&path).unwrap();
+        assert!(
+            value
+                .as_dictionary_mut()
+                .unwrap()
+                .remove("adi_pb")
+                .is_some()
+        );
+        plist::to_file_xml(&path, &value).unwrap();
+
+        let loaded: AnisetteState = plist::from_file(&path).unwrap();
+        assert_eq!(loaded.keychain_identifier, id);
+        assert!(!loaded.is_provisioned());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn fetch_anisette_remote_v3() -> Result<(), AnisetteError> {

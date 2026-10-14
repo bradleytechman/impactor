@@ -72,3 +72,103 @@ pub fn get_data_path() -> PathBuf {
 
     dir
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AdiReset {
+    Cleared,
+    AlreadyClear,
+}
+
+/// Drop the saved anisette provision and keep the device id.
+///
+/// Remote anisette stores the blob as `adi_pb` in `state.plist`. A local
+/// Android library stores it as `adi.pb` in the same directory. The keychain
+/// identifier stays, so the next sign-in re-provisions this device.
+pub(crate) fn reset_adi_pb() -> Result<AdiReset, String> {
+    reset_adi_pb_in(&get_data_path())
+}
+
+pub(crate) fn reset_adi_pb_in(dir: &Path) -> Result<AdiReset, String> {
+    let mut cleared = false;
+
+    let state_path = dir.join("state.plist");
+    if state_path.is_file() {
+        let mut value: plist::Value = plist::from_file(&state_path).map_err(|e| e.to_string())?;
+        let dict = value
+            .as_dictionary_mut()
+            .ok_or_else(|| "state.plist is not a dictionary".to_string())?;
+        if dict.remove("adi_pb").is_some() {
+            plist::to_file_xml(&state_path, &value).map_err(|e| e.to_string())?;
+            cleared = true;
+        }
+    }
+
+    let adi_file = dir.join("adi.pb");
+    if adi_file.is_file() {
+        fs::remove_file(&adi_file).map_err(|e| e.to_string())?;
+        cleared = true;
+    }
+
+    // Written by the one-shot client-info migration. They are not the provision.
+    for name in ["v3_client_info", "adi_client_info"] {
+        let path = dir.join(name);
+        if path.is_file() {
+            fs::remove_file(&path).map_err(|e| e.to_string())?;
+        }
+    }
+
+    Ok(if cleared {
+        AdiReset::Cleared
+    } else {
+        AdiReset::AlreadyClear
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reset_drops_the_provision_and_keeps_the_device_id() {
+        let dir = env::temp_dir().join(format!("impactor-adi-reset-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut dict = plist::Dictionary::new();
+        dict.insert(
+            "keychain_identifier".into(),
+            plist::Value::Data(vec![9; 16]),
+        );
+        dict.insert("adi_pb".into(), plist::Value::Data(vec![1, 2, 3, 4]));
+        plist::Value::Dictionary(dict)
+            .to_file_xml(dir.join("state.plist"))
+            .unwrap();
+        fs::write(dir.join("adi.pb"), b"local").unwrap();
+        fs::write(dir.join("v3_client_info"), b"marker").unwrap();
+
+        assert_eq!(reset_adi_pb_in(&dir).unwrap(), AdiReset::Cleared);
+
+        let value: plist::Value = plist::from_file(dir.join("state.plist")).unwrap();
+        let dict = value.as_dictionary().unwrap();
+        assert!(dict.get("adi_pb").is_none());
+        assert_eq!(
+            dict.get("keychain_identifier").and_then(|v| v.as_data()),
+            Some([9u8; 16].as_slice())
+        );
+        assert!(!dir.join("adi.pb").exists());
+        assert!(!dir.join("v3_client_info").exists());
+
+        assert_eq!(reset_adi_pb_in(&dir).unwrap(), AdiReset::AlreadyClear);
+        let value: plist::Value = plist::from_file(dir.join("state.plist")).unwrap();
+        assert_eq!(
+            value
+                .as_dictionary()
+                .unwrap()
+                .get("keychain_identifier")
+                .and_then(|v| v.as_data()),
+            Some([9u8; 16].as_slice())
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

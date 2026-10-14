@@ -25,6 +25,7 @@ pub enum Message {
     SelectAccount(usize),
     RemoveAccount(usize),
     ExportP12,
+    ResetAdiPb,
     SelectTeam(String, String),
     FetchTeams(String),
     TeamsLoaded(String, Vec<Team>),
@@ -269,6 +270,18 @@ impl SettingsScreen {
                     .style(appearance::s_button),
                 );
         }
+
+        // The provision belongs to this Mac, not to one Apple ID, so the
+        // button stays available when no account is selected.
+        buttons = buttons.push(
+            button(appearance::icon_text(
+                appearance::WRENCH,
+                t!("settings_reset_adi_pb"),
+                None,
+            ))
+            .on_press(Message::ResetAdiPb)
+            .style(appearance::s_button),
+        );
 
         buttons.align_y(Alignment::Center).into()
     }

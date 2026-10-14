@@ -14,6 +14,28 @@ use crate::auth::{
     TwoFactorRequest,
 };
 
+/// What the `Status` of an accepted password proof asks for next.
+///
+/// An Android client gets no `au`. `hsc` 409 still means a second step is due,
+/// and Apple has already pushed a code to the trusted devices. Asking for
+/// another code is not required. Treating a missing `au` as signed-in makes
+/// the following app-token request fail.
+fn login_state_after_proof(status: &Dictionary) -> LoginState {
+    if let Some(Value::String(auth_type)) = status.get("au") {
+        return match auth_type.as_str() {
+            "trustedDeviceSecondaryAuth" => LoginState::NeedsDevice2FA,
+            "secondaryAuth" => LoginState::NeedsSMS2FA,
+            other => LoginState::NeedsExtraStep(other.to_string()),
+        };
+    }
+
+    if status.get("hsc").and_then(|v| v.as_signed_integer()) == Some(409) {
+        return LoginState::Needs2FAVerification;
+    }
+
+    LoginState::LoggedIn
+}
+
 #[macro_export]
 macro_rules! plist_get_string {
     ($base:expr, $( $path:literal )+, $final_key:literal) => {{
@@ -82,6 +104,11 @@ impl Account {
                     }
                 }
                 LoginState::Needs2FAVerification => {
+                    if trusted_phone_numbers.is_empty() {
+                        if let Ok(extras) = _self.get_auth_extras().await {
+                            trusted_phone_numbers = extras.trusted_phone_numbers;
+                        }
+                    }
                     let request = TwoFactorRequest {
                         method: TwoFactorMethod::Device,
                         trusted_phone_numbers: trusted_phone_numbers.clone(),
@@ -262,15 +289,7 @@ impl Account {
         self.spd = Some(spd);
 
         let status = res.get("Status").unwrap().as_dictionary().unwrap();
-        if let Some(Value::String(auth_type)) = status.get("au") {
-            return match auth_type.as_str() {
-                "trustedDeviceSecondaryAuth" => Ok(LoginState::NeedsDevice2FA),
-                "secondaryAuth" => Ok(LoginState::NeedsSMS2FA),
-                other => Ok(LoginState::NeedsExtraStep(other.to_string())),
-            };
-        }
-
-        Ok(LoginState::LoggedIn)
+        Ok(login_state_after_proof(status))
     }
 
     pub fn get_pet(&self) -> Option<String> {
@@ -291,5 +310,34 @@ impl Account {
             *locked = locked.refresh().await.unwrap();
         }
         locked.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status(hsc: i64, au: Option<&str>) -> Dictionary {
+        let mut status = Dictionary::new();
+        status.insert("hsc".into(), hsc.into());
+        status.insert("ec".into(), 0.into());
+        if let Some(au) = au {
+            status.insert("au".into(), au.into());
+        }
+        status
+    }
+
+    #[test]
+    fn android_proof_without_au_asks_for_the_code_already_sent() {
+        let state = login_state_after_proof(&status(409, None));
+        assert!(matches!(state, LoginState::Needs2FAVerification));
+    }
+
+    #[test]
+    fn named_second_step_still_wins_over_hsc() {
+        let state = login_state_after_proof(&status(409, Some("trustedDeviceSecondaryAuth")));
+        assert!(matches!(state, LoginState::NeedsDevice2FA));
+        let state = login_state_after_proof(&status(200, None));
+        assert!(matches!(state, LoginState::LoggedIn));
     }
 }
